@@ -1,12 +1,23 @@
 package twopc
 
 import (
+	"encoding/json"
+	"fmt"
 	"github.com/RosettaFlow/Carrier-Go/common"
 	ctypes "github.com/RosettaFlow/Carrier-Go/consensus/twopc/types"
+	"github.com/RosettaFlow/Carrier-Go/db"
 	apipb "github.com/RosettaFlow/Carrier-Go/lib/common"
 	pb "github.com/RosettaFlow/Carrier-Go/lib/consensus/twopc"
 	"github.com/RosettaFlow/Carrier-Go/types"
 	"sync"
+)
+
+var (
+	proposalSet           = "proposalSet"
+	prepareVotes          = "prepareVotes"
+	confirmVotes          = "confirmVotes"
+	proposalPeerInfoCache = "proposalPeerInfoCache"
+	databasePath          = "./consensus_state"
 )
 
 type state struct {
@@ -30,6 +41,13 @@ type state struct {
 	confirmVotesLock      sync.RWMutex
 	confirmPeerInfoLock   sync.RWMutex
 }
+func OpenDatabase(dbpath string, cache int, handles int) (db.Database, error) {
+	db, err := db.NewLDBDatabase(dbpath, cache, handles)
+	if err != nil {
+		return nil, err
+	}
+	return db, nil
+}
 
 func newState() *state {
 	return &state{
@@ -39,6 +57,107 @@ func newState() *state {
 		prepareVotes:          make(map[common.Hash]*prepareVoteState, 0),
 		confirmVotes:          make(map[common.Hash]*confirmVoteState, 0),
 
+	}
+}
+func ConsensusStateFromDatabase() *state {
+	db, err := OpenDatabase(databasePath, 0, 0)
+	defer db.Close()
+	if err != nil {
+		log.Warning("open leveldb fail!,err:", err)
+		return &state{
+			proposalSet:           make(map[common.Hash]*ctypes.ProposalState, 0),
+			prepareVotes:          make(map[common.Hash]*prepareVoteState, 0),
+			confirmVotes:          make(map[common.Hash]*confirmVoteState, 0),
+			proposalPeerInfoCache: make(map[common.Hash]*pb.ConfirmTaskPeerInfo, 0),
+		}
+	}
+	proposalSetDB := make(map[common.Hash]*ctypes.ProposalState, 0)
+	value, _ := db.Get([]byte(proposalSet))
+	if value!=nil{
+		log.Info("proposalSetDB value is:",string(value))
+		if err := json.Unmarshal(value, &proposalSetDB); err != nil {
+			log.Warning("Found that the key is ", proposalSet, ", but Unmarshal failed.")
+			proposalSetDB = make(map[common.Hash]*ctypes.ProposalState, 0)
+		}
+	}else {
+		log.Warning("No key is ", proposalSet, " found in leveldb.")
+		proposalSetDB = make(map[common.Hash]*ctypes.ProposalState, 0)
+	}
+
+	prepareVotesDB := make(map[common.Hash]*prepareVoteState, 0)
+	value, _ = db.Get([]byte(prepareVotes))
+	if value != nil {
+		log.Info("prepareVotesDB value is:", string(value))
+		if err := json.Unmarshal(value, &prepareVotesDB); err != nil {
+			log.Warning("Found that the key is ", prepareVotes, ", but Unmarshal failed.")
+			prepareVotesDB = make(map[common.Hash]*prepareVoteState, 0)
+		}
+	} else {
+		log.Warning("No key is ", prepareVotes, " found in leveldb.")
+		prepareVotesDB = make(map[common.Hash]*prepareVoteState, 0)
+	}
+
+	confirmVotesDB := make(map[common.Hash]*confirmVoteState, 0)
+	value, _ = db.Get([]byte(confirmVotes))
+	if value != nil {
+		log.Info("confirmVotesDB value is:", string(value))
+		if err := json.Unmarshal(value, &confirmVotesDB); err != nil {
+			log.Warning("Found that the key is ", confirmVotes, ", but Unmarshal failed.")
+			confirmVotesDB = make(map[common.Hash]*confirmVoteState, 0)
+		}
+	} else {
+		log.Warning("No key is ", confirmVotes, " found in leveldb.")
+		confirmVotesDB = make(map[common.Hash]*confirmVoteState, 0)
+	}
+
+	proposalPeerInfoCacheDB := make(map[common.Hash]*pb.ConfirmTaskPeerInfo, 0)
+	value, _ = db.Get([]byte(proposalPeerInfoCache))
+	if value != nil {
+		log.Info("proposalPeerInfoCacheDB value is:", string(value))
+		if err := json.Unmarshal(value, &proposalPeerInfoCacheDB); err != nil {
+			log.Warning("Found that the key is ", proposalPeerInfoCache, ", but Unmarshal failed.")
+			proposalPeerInfoCacheDB = make(map[common.Hash]*pb.ConfirmTaskPeerInfo, 0)
+		}
+	} else {
+		log.Warning("No key is ", proposalPeerInfoCache, " found in leveldb.")
+		proposalPeerInfoCacheDB = make(map[common.Hash]*pb.ConfirmTaskPeerInfo, 0)
+	}
+
+	return &state{
+		proposalSet:           proposalSetDB,
+		prepareVotes:          prepareVotesDB,
+		confirmVotes:          confirmVotesDB,
+		proposalPeerInfoCache: proposalPeerInfoCacheDB,
+	}
+}
+
+func UpdateStateToDatabase(value interface{}) {
+	db, err := db.NewLDBDatabase(databasePath, 0, 0)
+	defer db.Close()
+	if err != nil {
+		log.Warning("open leveldb fail!,err:", err)
+	}
+	val, _ := json.Marshal(value)
+	log.Info("UpdateStateToDatabase val:", string(val))
+	switch value.(type) {
+	case map[common.Hash]*ctypes.ProposalState:
+		if err := db.Put([]byte(proposalSet), val); err != nil {
+			log.Warning("UpdateStateToDatabase runningProposals fail")
+		}
+	case map[common.Hash]*prepareVoteState:
+		if err := db.Put([]byte(prepareVotes), val); err != nil {
+			log.Warning("UpdateStateToDatabase runningProposals fail")
+		}
+	case map[common.Hash]*confirmVoteState:
+		if err := db.Put([]byte(confirmVotes), val); err != nil {
+			log.Warning("UpdateStateToDatabase runningProposals fail")
+		}
+	case map[common.Hash]*pb.ConfirmTaskPeerInfo:
+		if err := db.Put([]byte(proposalPeerInfoCache), val); err != nil {
+			log.Warning("UpdateStateToDatabase runningProposals fail")
+		}
+	default:
+		panic(fmt.Sprintf("cannot found type %T,please check.", value))
 	}
 }
 
